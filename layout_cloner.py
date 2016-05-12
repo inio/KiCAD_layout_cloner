@@ -32,101 +32,175 @@
 
 import sys			
 import re			#regexp
-from pcbnew import *
+import pcbnew
 
+from pcbnew import FromMM
+from pcbnew import wxPoint
 
 #Settings, modify these to suit your project
 
-#The schematic with the hierarchical sheets (not used currently, requires utilizing kipy to parse schematic)
-#You can copy the schema parsing with kipy for example from klonor-kicad if you have enough components to justify it
-#schemaTemplate = './boosterilevy/booster.sch'
-#Instead the components to be cloned are currently given manually
-templateReferences = ['D201', 'D202', 'D203', 'Q201', 'Q202', 'P201', 'R201', 'R202', 'R203', 'R204', 'C201']
-
-#The .kicad-pcb board with a ready layout for the area to be cloned.
-#The cloned area must be surrounded by a (square) zone in the comment layer.
-inputBoard = './boosterilevy/16x_boosteri.kicad_pcb'
-#Output file, original file remains unmodified
-outputBoardFile = './boosterilevy/skriptioutput.kicad_pcb'
-
-templateRefModulo = 100;	#Difference in the reference numbers between hierarchical sheet
-templateRefStart = 200;		#Starting point of numbering in the first hierarchical sheet
-move_dx = FromMM(11)		#Spacing between clones in x direction
-move_dy = FromMM(11)		#Spacing between clones in y direction
-clonesX = 4			#Number of clones in x direction
-clonesY = 4			#Number of clones in y direction
+templateRefModulo = 100;  #Difference in the reference numbers between hierarchical sheet
+templateRefStart = 200;   #Starting point of numbering in the first hierarchical sheet
+move_dx = FromMM(20)      #Spacing between clones in x direction
+move_dy = FromMM(0)       #Spacing between clones in y direction
+clonesX = 4               #Number of clones in x direction
+clonesY = 1               #Number of clones in y direction
 
 
-numberOfClones = clonesX * clonesY
-board = LoadBoard(inputBoard)
+def do_clone(templateRefStart, templateRefModulo, clonesX, clonesY, move_dx, move_dy):
+  board = pcbnew.GetBoard()
+  
+  numberOfClones = clonesX * clonesY
 
-#Cloning the modules
-for templateRef in templateReferences:							#For each module in the template schema
-    templateModule = board.FindModuleByReference(templateRef)				#Find the corresponding module in the input board
-    if templateModule is not None:
-        cloneReferences = []
-        templateReferenceNumber = (re.findall(r"\d+", templateRef)).pop(0)		#Extract reference number (as string)
-
-        for i in range(0, numberOfClones-1):						#Create list of references to be cloned of this module in the template	
-            cloneRefNumber = int(templateReferenceNumber) + (i+1)*templateRefModulo	#Number of the next clone
-            cloneReferences.append(re.sub(templateReferenceNumber, "", templateRef) + str(cloneRefNumber))	#String reference of the next clone			
-        print 'Original reference: ', templateRef, ', Generated clone references', cloneReferences
-
-        for counter, cloneRef in enumerate(cloneReferences):				#Move each of the clones to appropriate location
-            templatePosition = templateModule.GetPosition()
-            cloneModule = board.FindModuleByReference(cloneRef)				
-            if cloneModule is not None:
-                if cloneModule.GetLayer() is not templateModule.GetLayer():			#If the cloned module is not on the same layer as the template
-                    cloneModule.Flip(wxPoint(1,1))						#Flip it around any point to change the layer
-                vect = wxPoint(templatePosition.x+(counter+1)%clonesX*move_dx, templatePosition.y+(counter+1)//clonesX*move_dy) #Calculate new position
-                cloneModule.SetPosition(vect)						#Set position
-                cloneModule.SetOrientation(templateModule.GetOrientation())			#And copy orientation from template
-            else:
-                print 'Module to be moved (', cloneRef, ') is not found in the board.'
-    else:
-        print 'Module ', templateRef, ' was not found in the template board'
-print 'Modules moved and oriented according to template.'
-
-#Cloning zones inside the template area.
-#First lets use the comment zone to define the area to be cloned.
-for i in range(0, board.GetAreaCount()):
+  #Cloning zones inside the template area.
+  #First lets use the comment zone to define the area to be cloned.
+  templateRect = None
+  for i in range(0, board.GetAreaCount()):
     zone = board.GetArea(i)				
-    if zone.GetLayer() == 41:								#Find the comment zone encasing the template board area
-        templateRect = zone.GetBoundingBox()
-        #board.RemoveArea(zone)								#Removing comment zone does not work
-	print 'Comment zone left top: ', templateRect.GetOrigin(), ' width: ', templateRect.GetWidth(), ' height: ', templateRect.GetHeight()
+    if zone.GetLayer() == 41:
+      assert templateRect is None, "You must only have one comment zone"
+      templateRect = zone.GetBoundingBox()
+  print 'Comment zone left top: ', templateRect.GetOrigin(), ' width: ', templateRect.GetWidth(), ' height: ', templateRect.GetHeight()
 
-modules = board.GetModules()
-#Then iterate through all the other zones and copy them
-print 'Iterating through all the pads for each cloned zone, might take a few seconds...'
-for i in range(0, board.GetAreaCount()):						#For all the zones in the template board
-    zone = board.GetArea(i)
-    #print 'Original zone location', zone.GetPosition()
-            
-    if templateRect.Contains(zone.GetPosition()) and zone.GetLayer() is not 41:		#If the zone is inside the area to be cloned (the comment zone) and it is not the comment zone (layer 41)
-        for i in range(1, numberOfClones):						#For each target clone areas
-            zoneClone = zone.Duplicate()						#Make copy of the zone to be cloned
-            zoneClone.Move(wxPoint(i%clonesX*move_dx, i//clonesX*move_dy))		#Move it inside the target clone area
-            for module in modules:								#Iterate through all the pads (also the cloned ones) in the board...
-                for pad in module.Pads():
-                    if zoneClone.HitTestInsideZone(pad.GetPosition()) and pad.IsOnLayer(zoneClone.GetLayer()):		#To find the (last) one inside the cloned zone. pad.GetZoneConnection() could also be used
-                        zoneClone.SetNetCode(pad.GetNet().GetNet())			#And set the (maybe) correct net for the zone
-            board.Add(zoneClone)								#Add to the zone board
-print 'Zones cloned.'
+  modulesToClone = []
+  
+  netNames = {}
+    
+  netmap = {}
 
-#Cloning tracks inside the template area
-tracks = board.GetTracks()
-cloneTracks = []
-for track in tracks:
-    if track.HitTest(templateRect):							#Find tracks which touch the comment zone
-        for i in range(1, numberOfClones):						#For each area to be cloned
-            cloneTrack = track.Duplicate()						#Copy track
-            cloneTrack.Move(wxPoint(i%clonesX*move_dx, i//clonesX*move_dy))		#Move it
-            cloneTracks.append(cloneTrack)						#Add to temporary list
-for track in cloneTracks:								#Append the temporary list to board
-    tracks.Append(track)
-print 'Tracks cloned.'
+  # Identify the source modules
+  for module in board.GetModules():
+      [prefix, index] = re.match('([A-Za-z]+)([0-9]+)',module.GetReference()).groups()
+      index = int(index)
+      if not templateRect.Contains(module.GetPosition()):
+          if index >= templateRefStart and index < templateRefStart+templateRefModulo:
+              print 'WARNING: Module in clone range ', module.GetReference(), ' not in clone zone'
+      else:
+          if index < templateRefStart or index >= templateRefStart+templateRefModulo:
+              print 'ERROR: Unexpected module ', module.GetReference(), ' found in clone zone'
+          modulesToClone.append((prefix, index))
 
-#Save output file
-board.Save(outputBoardFile)
-print 'Script completed & output file saved.'
+  # Figure out the mapping between template nets and clone nets.  Use a voting based
+  # approach to allow small differences in the netlist structures (e.g. to have ID pins
+  # pulled differently).
+  for i in range(1, numberOfClones):
+      netVotes = {}
+      for (referencePrefix, templateReferenceNumber) in modulesToClone:
+          templateRef = '%s%d'%(referencePrefix, templateReferenceNumber)
+          templateModule = board.FindModuleByReference(templateRef)
+          
+          cloneRefNumber = templateReferenceNumber + i*templateRefModulo
+          cloneRef = '%s%d'%(referencePrefix, cloneRefNumber)
+
+          cloneModule = board.FindModuleByReference(cloneRef)				
+          if cloneModule is None:
+              print 'Clone module ', cloneRef, ' is not placed in the board.'
+              return
+          
+          if (cloneModule.GetFPID() != templateModule.GetFPID()):
+              print 'Clone module ', cloneRef, ' has a different footprint.'
+              return
+
+          for (templatePad, clonePad) in zip(templateModule.Pads(), cloneModule.Pads()):
+              assert templatePad.GetPadName() == clonePad.GetPadName()
+              templateCode = templatePad.GetNetCode()
+              cloneCode = clonePad.GetNetCode()
+              netVotes.setdefault(templateCode, {})
+              netVotes[templateCode].setdefault(cloneCode, 0)
+              netVotes[templateCode][cloneCode] += 1
+              if templateCode not in netNames:
+                netNames[templateCode] = templatePad.GetNetname()
+              if cloneCode not in netNames:
+                netNames[cloneCode] = clonePad.GetNetname()
+              
+      for templateCode in netVotes:
+          votes = netVotes[templateCode]
+          if len(votes) > 1:
+            print "non-unanimous net association: %s (clone %d)"%(netNames[templateCode], i)
+            for cloneCode in votes:
+              print "%8d: %s"%(votes[cloneCode], netNames[cloneCode])
+          netmap.setdefault(templateCode, [None]*(numberOfClones+1));
+          netmap[templateCode][i] = max(votes, key=votes.get)
+
+
+  for (referencePrefix, templateReferenceNumber) in modulesToClone:  #For each module in the template zone
+      templateRef = '%s%d'%(referencePrefix, templateReferenceNumber)
+      templateModule = board.FindModuleByReference(templateRef)  #Find the corresponding module in the input board
+      templatePosition = templateModule.GetPosition()
+      templateRefText = templateModule.Reference()
+      templateValText = templateModule.Reference()
+      for i in range(1, numberOfClones):
+          cloneRefNumber = templateReferenceNumber + i*templateRefModulo  #Number of the next clone
+          cloneRef = '%s%d'%(referencePrefix, cloneRefNumber)  #String reference of the next clone			
+
+          cloneModule = board.FindModuleByReference(cloneRef)				
+          if cloneModule is None:
+              print 'Module to be moved (', cloneRef, ') is not found in the board.'
+              continue
+        
+          if cloneModule.GetLayer() is not templateModule.GetLayer():			#If the cloned module is not on the same layer as the template
+              cloneModule.Flip(wxPoint(1,1))						#Flip it around any point to change the layer
+        
+          vect = wxPoint(templatePosition.x+(i%clonesX)*move_dx, templatePosition.y+(i//clonesX)*move_dy) #Calculate new position
+          cloneModule.SetPosition(vect)						#Set position
+          cloneModule.SetOrientation(templateModule.GetOrientation())			#And copy orientation from template
+          
+          for (templateText, cloneText) in [(templateRefText, cloneModule.Reference()), 
+                                            (templateValText, cloneModule.Value())]:
+            cloneText.SetPos0(templateText.GetPos0())
+            cloneText.SetOrientation(templateText.GetOrientation())
+            cloneText.SetHeight(templateText.GetHeight())
+            cloneText.SetWidth(templateText.GetWidth())
+            cloneText.SetThickness(templateText.GetThickness())
+            cloneText.SetVisible(templateText.IsVisible())
+  print 'Modules and module text moved and oriented according to template.'
+
+  for templateZoneNum in range(0, board.GetAreaCount()):						#For all the zones in the template board
+      zone = board.GetArea(templateZoneNum)
+      #print 'Original zone location', zone.GetPosition()
+      templateNetCode = zone.GetNetCode()
+      if templateRect.Contains(zone.GetPosition()) and zone.GetLayer() is not 41:		#If the zone is inside the area to be cloned (the comment zone) and it is not the comment zone (layer 41)     
+          for i in range(1, numberOfClones):						#For each target clone areas
+              zoneClone = zone.Duplicate()						#Make copy of the zone to be cloned
+              zoneClone.Move(wxPoint(i%clonesX*move_dx, i//clonesX*move_dy))		#Move it inside the target clone area
+              if templateNetCode in netmap:
+                zoneClone.SetNetCode(netmap[templateNetCode][i]);
+              else:
+                print 'WARNING: Unknown track net ', track.GetNetname(), ' found in template'
+              board.Add(zoneClone)								#Add to the zone board
+  print 'Zones cloned.'
+
+  #Cloning tracks inside the template area
+  tracks = board.GetTracks()
+  cloneTracks = []
+  for track in tracks:
+      if track.HitTest(templateRect):							#Find tracks which touch the comment zone
+          templateNetCode = track.GetNetCode()
+          for i in range(1, numberOfClones):						#For each area to be cloned
+              cloneTrack = track.Duplicate()						#Copy track
+              cloneTrack.Move(wxPoint(i%clonesX*move_dx, i//clonesX*move_dy))		#Move it
+              if templateNetCode in netmap:
+                cloneTrack.SetNetCode(netmap[templateNetCode][i])
+              else:
+                print 'WARNING: Unknown track net ', track.GetNetname(), ' found in template'
+              cloneTracks.append(cloneTrack)						#Add to temporary list
+  for track in cloneTracks:								#Append the temporary list to board
+      tracks.Append(track)
+  print 'Tracks cloned.'
+
+  #Cloning drawings inside the template area
+  drawings = board.GetDrawings()
+  cloneDrawings = []
+  for drawing in drawings:
+      if drawing.HitTest(templateRect):							#Find tracks which touch the comment zone
+          for i in range(1, numberOfClones):						#For each area to be cloned
+              cloneDrawing = drawing.Duplicate()						#Copy track
+              cloneDrawing.Move(wxPoint(i%clonesX*move_dx, i//clonesX*move_dy))		#Move it
+              cloneDrawings.append(cloneDrawing)						#Add to temporary list
+  for drawing in cloneDrawings:								#Append the temporary list to board
+      drawings.Append(drawing)
+  print 'Drawings cloned.'
+
+do_clone(templateRefStart, templateRefModulo, clonesX, clonesY, move_dx, move_dy)
+
+print 'Script completed'
